@@ -25,7 +25,7 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
         color: Color::WHITE,
     };
     let text_alignment = TextAlignment {
-        vertical: VerticalAlign::Center,
+        vertical: VerticalAlign::Bottom,
         horizontal: HorizontalAlign::Center,
     };
     // 2d camera
