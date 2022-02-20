@@ -39,10 +39,10 @@ impl Node for MainPass2dNode {
         world: &World,
     ) -> Result<(), NodeRunError> {
         let view_entity = graph.get_input_entity(Self::IN_VIEW)?;
-        let (transparent_phase, target) = self
-            .query
-            .get_manual(world, view_entity)
-            .expect("view entity should exist");
+        let (transparent_phase, target) = match self.query.get_manual(world, view_entity) {
+            Ok(c) => c,
+            Err(_) => return Ok(()), // No window
+        };
 
         let pass_descriptor = RenderPassDescriptor {
             label: Some("main_pass_2d"),
