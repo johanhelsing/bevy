@@ -41,7 +41,7 @@ impl Default for ComputedVisibility {
 }
 
 /// Use this component to opt-out of built-in frustum culling for Mesh entities
-#[derive(Component)]
+#[derive(Component, Clone, Default)]
 pub struct NoFrustumCulling;
 
 #[derive(Clone, Component, Default, Debug, Reflect)]
