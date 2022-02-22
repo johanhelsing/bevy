@@ -253,10 +253,15 @@ struct FragmentInput {
     [[location(0)]] color: vec4<f32>;
 };
 
+fn fwidth_wrapper(color: vec3<f32>) -> vec3<f32> {
+    return fwidth(color.rgb);
+}
+
 /// Entry point for the fragment shader
 [[stage(fragment)]]
 fn fragment(in: FragmentInput) -> [[location(0)]] vec4<f32> {
-    return in.color;
+    // return vec4<f32>(fwidth(in.color.rgb), in.color.a);
+    return vec4<f32>(fwidth_wrapper(in.color.rgb), in.color.a);
 }
 ";
 
