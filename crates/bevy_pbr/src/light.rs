@@ -751,7 +751,7 @@ pub fn check_light_mesh_visibility(
             }
 
             computed_visibility.is_visible = true;
-            visible_entities.entities.push(entity);
+            visible_entities.entities.insert(entity);
         }
 
         // TODO: check for big changes in visible entities len() vs capacity() (ex: 2x) and resize
@@ -815,13 +815,13 @@ pub fn check_light_mesh_visibility(
                         {
                             if frustum.intersects_obb(aabb, &model_to_world) {
                                 computed_visibility.is_visible = true;
-                                visible_entities.entities.push(entity);
+                                visible_entities.entities.insert(entity);
                             }
                         }
                     } else {
                         computed_visibility.is_visible = true;
                         for visible_entities in cubemap_visible_entities.iter_mut() {
-                            visible_entities.entities.push(entity);
+                            visible_entities.entities.insert(entity);
                         }
                     }
                 }

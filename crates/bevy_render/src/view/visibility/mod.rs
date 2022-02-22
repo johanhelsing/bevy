@@ -1,5 +1,6 @@
 mod render_layers;
 
+use bevy_utils::HashSet;
 pub use render_layers::*;
 
 use bevy_app::{CoreStage, Plugin};
@@ -48,11 +49,11 @@ pub struct NoFrustumCulling;
 #[reflect(Component)]
 pub struct VisibleEntities {
     #[reflect(ignore)]
-    pub entities: Vec<Entity>,
+    pub entities: HashSet<Entity>,
 }
 
 impl VisibleEntities {
-    pub fn iter(&self) -> impl DoubleEndedIterator<Item = &Entity> {
+    pub fn iter(&self) -> impl ExactSizeIterator<Item = &Entity> {
         self.entities.iter()
     }
 
@@ -189,7 +190,7 @@ pub fn check_visibility(
             }
 
             computed_visibility.is_visible = true;
-            visible_entities.entities.push(entity);
+            visible_entities.entities.insert(entity);
         }
 
         // TODO: check for big changes in visible entities len() vs capacity() (ex: 2x) and resize

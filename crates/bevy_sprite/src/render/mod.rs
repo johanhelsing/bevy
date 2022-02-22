@@ -365,7 +365,6 @@ pub fn queue_sprites(
     mut extracted_sprites: ResMut<ExtractedSprites>,
     mut views: Query<(&VisibleEntities, &mut RenderPhase<Transparent2d>)>,
     events: Res<SpriteAssetEvents>,
-    mut visible_entities_map: Local<HashSet<Entity>>,
 ) {
     // If an image has changed, the GpuImage has (probably) changed
     for event in &events.images {
@@ -409,9 +408,6 @@ pub fn queue_sprites(
             let extracted_sprites = &mut extracted_sprites.sprites;
             let image_bind_groups = &mut *image_bind_groups;
 
-            visible_entities_map.clear();
-            visible_entities_map.extend(visible_entities.iter().copied());
-
             transparent_phase.items.reserve(extracted_sprites.len());
 
             // Sort sprites by z for correct transparency and then by handle to improve batching
@@ -440,7 +436,7 @@ pub fn queue_sprites(
             // Batches are merged later (in `batch_phase_system()`), so that they can be interrupted
             // by any other phase item (and they can interrupt other items from batching).
             for extracted_sprite in extracted_sprites.iter() {
-                if !visible_entities_map.contains(&extracted_sprite.entity) {
+                if !visible_entities.entities.contains(&extracted_sprite.entity) {
                     continue;
                 }
                 let new_batch = SpriteBatch {
