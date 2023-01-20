@@ -976,6 +976,13 @@ pub struct WindowDescriptor {
     ///
     /// This value has no effect on non-web platforms.
     pub fit_canvas_to_parent: bool,
+    /// Whether or not to stop events from propagating out of the canvas element
+    ///
+    /// This will prevent common browser hotkeys like F5, F12, Ctrl+R, tab, etc.
+    /// from performing their default behavior while the bevy app has focus.
+    ///
+    /// This value has no effect on non-web platforms.
+    pub prevent_default_event_handling: bool,
     /// Specifies how the alpha channel of the textures should be handled during compositing.
     pub alpha_mode: CompositeAlphaMode,
 }
@@ -999,6 +1006,7 @@ impl Default for WindowDescriptor {
             transparent: false,
             canvas: None,
             fit_canvas_to_parent: false,
+            prevent_default_event_handling: true,
             alpha_mode: CompositeAlphaMode::Auto,
         }
     }
