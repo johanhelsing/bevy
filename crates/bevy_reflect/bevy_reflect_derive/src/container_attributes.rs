@@ -224,7 +224,7 @@ impl ReflectTraits {
             &TraitImpl::Implemented(span) => Some(quote_spanned! {span=>
                 fn reflect_hash(&self) -> Option<u64> {
                     use std::hash::{Hash, Hasher};
-                    let mut hasher = #bevy_reflect_path::ReflectHasher::default();
+                    let mut hasher = #bevy_reflect_path::reflect_hasher();
                     Hash::hash(&std::any::Any::type_id(self), &mut hasher);
                     Hash::hash(self, &mut hasher);
                     Some(hasher.finish())

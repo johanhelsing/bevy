@@ -19,7 +19,7 @@ pub use instant::{Duration, Instant};
 pub use tracing;
 pub use uuid::Uuid;
 
-use ahash::RandomState;
+pub use ahash::RandomState;
 use hashbrown::hash_map::RawEntryMut;
 use std::{
     fmt::Debug,
