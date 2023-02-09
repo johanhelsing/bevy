@@ -6,10 +6,17 @@ use crate::{
 use std::{
     any::{self, Any, TypeId},
     fmt::Debug,
+    hash::BuildHasher,
 };
 
 use crate::utility::NonGenericTypeInfoCell;
-pub use bevy_utils::AHasher as ReflectHasher;
+
+use bevy_utils::FixedState;
+
+#[inline]
+pub fn reflect_hasher() -> bevy_utils::AHasher {
+    FixedState.build_hasher()
+}
 
 /// An immutable enumeration of "kinds" of reflected type.
 ///
