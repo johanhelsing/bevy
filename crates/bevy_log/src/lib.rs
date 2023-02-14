@@ -25,6 +25,7 @@ pub mod prelude {
     };
 }
 
+use bevy_utils::tracing::Subscriber;
 pub use bevy_utils::tracing::{
     debug, debug_span, error, error_span, info, info_span, trace, trace_span, warn, warn_span,
     Level,
@@ -32,6 +33,7 @@ pub use bevy_utils::tracing::{
 
 use bevy_app::{App, Plugin};
 use tracing_log::LogTracer;
+pub use tracing_subscriber;
 #[cfg(feature = "tracing-chrome")]
 use tracing_subscriber::fmt::{format::DefaultFields, FormattedFields};
 use tracing_subscriber::{prelude::*, registry::Registry, EnvFilter};
@@ -91,6 +93,21 @@ pub struct LogPlugin {
     /// Filters out logs that are "less than" the given level.
     /// This can be further filtered using the `filter` setting.
     pub level: Level,
+
+    // todo: better way of passing layers to plugin
+    pub extra_layers: std::sync::Arc<
+        std::sync::Mutex<
+            Option<
+                Vec<
+                    Box<
+                        dyn tracing_subscriber::layer::Layer<Box<dyn Subscriber + Send + Sync>>
+                            + Send
+                            + Sync,
+                    >,
+                >,
+            >,
+        >,
+    >,
 }
 
 impl Default for LogPlugin {
@@ -98,6 +115,7 @@ impl Default for LogPlugin {
         Self {
             filter: "wgpu=error".to_string(),
             level: Level::INFO,
+            extra_layers: Default::default(),
         }
     }
 }
@@ -124,6 +142,7 @@ impl Plugin for LogPlugin {
         #[cfg(feature = "trace")]
         let subscriber = subscriber.with(tracing_error::ErrorLayer::default());
 
+        let finished_subscriber;
         #[cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))]
         {
             #[cfg(feature = "tracing-chrome")]
@@ -166,8 +185,7 @@ impl Plugin for LogPlugin {
             #[cfg(feature = "tracing-tracy")]
             let subscriber = subscriber.with(tracy_layer);
 
-            bevy_utils::tracing::subscriber::set_global_default(subscriber)
-                .expect("Could not set global default tracing subscriber. If you've already set up a tracing subscriber, please disable LogPlugin from Bevy's DefaultPlugins");
+            finished_subscriber = subscriber;
         }
 
         #[cfg(target_arch = "wasm32")]
@@ -176,15 +194,29 @@ impl Plugin for LogPlugin {
             let subscriber = subscriber.with(tracing_wasm::WASMLayer::new(
                 tracing_wasm::WASMLayerConfig::default(),
             ));
-            bevy_utils::tracing::subscriber::set_global_default(subscriber)
-                .expect("Could not set global default tracing subscriber. If you've already set up a tracing subscriber, please disable LogPlugin from Bevy's DefaultPlugins");
+
+            finished_subscriber = subscriber;
         }
 
         #[cfg(target_os = "android")]
         {
-            let subscriber = subscriber.with(android_tracing::AndroidLayer::default());
+            finished_subscriber = subscriber.with(android_tracing::AndroidLayer::default());
+        }
+
+        let extra_layers = self.extra_layers.lock().unwrap().take();
+
+        let subscriber_already_set = if let Some(layers) = extra_layers {
+            let subscriber = Box::new(finished_subscriber);
+            let subscriber = layers.with_subscriber(subscriber);
+            // let subscriber = subscriber.with(self.extra_layers);
             bevy_utils::tracing::subscriber::set_global_default(subscriber)
-                .expect("Could not set global default tracing subscriber. If you've already set up a tracing subscriber, please disable LogPlugin from Bevy's DefaultPlugins");
+        } else {
+            bevy_utils::tracing::subscriber::set_global_default(finished_subscriber)
+        }
+        .is_err();
+
+        if subscriber_already_set {
+            warn!("Could not set global tracing subscriber as it is already set. Consider disabling LogPlugin.");
         }
     }
 }
