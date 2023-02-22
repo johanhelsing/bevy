@@ -142,6 +142,30 @@ impl Plugin for LogPlugin {
         #[cfg(feature = "trace")]
         let subscriber = subscriber.with(tracing_error::ErrorLayer::default());
 
+        #[cfg(not(target_arch = "wasm32-unknown-unknown"))]
+        let subscriber = {
+            #[derive(bevy_ecs::system::Resource)]
+            struct GuardRes(tracing_appender::non_blocking::WorkerGuard);
+
+            let file_appender = tracing_appender::rolling::RollingFileAppender::new(
+                tracing_appender::rolling::Rotation::DAILY,
+                std::path::PathBuf::from("."),
+                "log",
+            );
+
+            let (non_blocking, worker_guard) = tracing_appender::non_blocking(file_appender);
+
+            // We need to keep this somewhere so it doesn't get dropped. If it gets
+            // dropped then it will silently stop writing to the file
+            app.insert_resource(GuardRes(worker_guard));
+
+            subscriber.with(
+                tracing_subscriber::fmt::Layer::default()
+                    .with_ansi(false)
+                    .with_writer(non_blocking),
+            )
+        };
+
         let finished_subscriber;
         #[cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))]
         {
