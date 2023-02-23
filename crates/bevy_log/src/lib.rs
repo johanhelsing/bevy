@@ -142,7 +142,7 @@ impl Plugin for LogPlugin {
         #[cfg(feature = "trace")]
         let subscriber = subscriber.with(tracing_error::ErrorLayer::default());
 
-        #[cfg(not(target_arch = "wasm32-unknown-unknown"))]
+        #[cfg(not(target_arch = "wasm32"))]
         let subscriber = {
             #[derive(bevy_ecs::system::Resource)]
             struct GuardRes(tracing_appender::non_blocking::WorkerGuard);
