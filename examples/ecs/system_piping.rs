@@ -14,6 +14,7 @@ fn main() {
         .add_plugin(LogPlugin {
             level: Level::TRACE,
             filter: "".to_string(),
+            ..default()
         })
         .add_system(parse_message_system.pipe(handler_system))
         .add_system(data_pipe_system.pipe(info))
