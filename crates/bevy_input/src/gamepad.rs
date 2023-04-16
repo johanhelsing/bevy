@@ -1240,6 +1240,109 @@ const ALL_AXIS_TYPES: [GamepadAxisType; 6] = [
     GamepadAxisType::RightZ,
 ];
 
+/// The intensity at which a gamepad's force-feedback motors may rumble.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GamepadRumbleIntensity {
+    /// The rumble intensity of the strong gamepad motor
+    ///
+    /// Ranges from 0.0 to 1.0
+    ///
+    /// By convention, this is usually a low-frequency motor on the left-hand
+    /// side of the gamepad, though it may vary across platforms and hardware.
+    pub strong: f32,
+    /// The rumble intensity of the weak gamepad motor
+    ///
+    /// Ranges from 0.0 to 1.0
+    ///
+    /// By convention, this is usually a high-frequency motor on the right-hand
+    /// side of the gamepad, though it may vary across platforms and hardware.
+    pub weak: f32,
+}
+
+impl GamepadRumbleIntensity {
+    /// Rumble both gamepad motors at maximum intensity
+    pub const MAX: Self = GamepadRumbleIntensity {
+        strong: 1.0,
+        weak: 1.0,
+    };
+
+    /// Rumble the weak motor at maximum intensity
+    pub const WEAK_MAX: Self = GamepadRumbleIntensity {
+        strong: 0.0,
+        weak: 1.0,
+    };
+
+    /// Rumble the strong motor at maximum intensity
+    pub const STRONG_MAX: Self = GamepadRumbleIntensity {
+        strong: 1.0,
+        weak: 0.0,
+    };
+
+    /// Don't rumble at all, only makes sense when `additive` is `false`
+    pub const ZERO: Self = GamepadRumbleIntensity {
+        strong: 0.0,
+        weak: 0.0,
+    };
+}
+
+/// Request that `gamepad` should rumble with `intensity` for `duration_seconds`
+///
+/// # Notes
+///
+/// Does nothing if the `gamepad` or platform does not support rumble.
+///
+/// If a new `GamepadRumbleRequest` is sent while another one is still
+/// executing, it's intensity is added to the existing one.
+///
+/// This means if two rumbles at half intensity are added at the same time,
+/// their intensities will be added up, and the controller will rumble at full
+/// intensity until one of the rumbles finishes, then the rumble will continue
+/// at the intensity of the other event.
+///
+/// # Example
+///
+/// ```
+/// # use bevy_input::gamepad::{Gamepad, Gamepads, GamepadRumbleRequest, GamepadRumbleIntensity};
+/// # use bevy_ecs::prelude::{EventWriter, Res};
+/// fn rumble_gamepad_system(mut rumble_requests: EventWriter<GamepadRumbleRequest>, gamepads: Res<Gamepads>) {
+///     for gamepad in gamepads.iter() {
+///         let request = GamepadRumbleRequest {
+///             gamepad,
+///             intensity: GamepadRumbleIntensity::MAX,
+///             duration_seconds: 0.5,
+///             additive: true,
+///         };
+///         rumble_requests.send(request);
+///     }
+/// }
+/// ```
+#[derive(Clone)]
+pub struct GamepadRumbleRequest {
+    /// The duration in seconds of the rumble
+    pub duration_seconds: f32,
+    /// How intense the rumble should be
+    pub intensity: GamepadRumbleIntensity,
+    /// The gamepad to rumble
+    pub gamepad: Gamepad,
+    /// Whether the rumble effects should add up, or replace any existing effects
+    pub additive: bool,
+}
+
+impl GamepadRumbleRequest {
+    /// Stop all running rumbles on the given `Gamepad`
+    pub fn stop(gamepad: Gamepad) -> Self {
+        Self {
+            duration_seconds: 0.0,
+            intensity: GamepadRumbleIntensity {
+                strong: 0.0,
+                weak: 0.0,
+            },
+            gamepad,
+            additive: false,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::gamepad::{AxisSettingsError, ButtonSettingsError};
