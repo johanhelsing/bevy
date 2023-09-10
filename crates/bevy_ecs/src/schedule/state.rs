@@ -10,6 +10,8 @@ use crate::reflect::ReflectResource;
 use crate::schedule::ScheduleLabel;
 use crate::system::Resource;
 use crate::world::World;
+#[cfg(feature = "bevy_reflect")]
+use bevy_reflect::std_traits::ReflectDefault;
 
 pub use bevy_ecs_macros::States;
 
@@ -80,7 +82,7 @@ pub struct OnTransition<S: States> {
 #[cfg_attr(
     feature = "bevy_reflect",
     derive(bevy_reflect::Reflect),
-    reflect(Resource)
+    reflect(Resource, Default)
 )]
 pub struct State<S: States>(S);
 
@@ -121,7 +123,7 @@ impl<S: States> Deref for State<S> {
 #[cfg_attr(
     feature = "bevy_reflect",
     derive(bevy_reflect::Reflect),
-    reflect(Resource)
+    reflect(Resource, Default)
 )]
 pub struct NextState<S: States>(pub Option<S>);
 
