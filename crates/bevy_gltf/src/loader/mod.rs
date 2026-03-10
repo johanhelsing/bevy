@@ -595,7 +595,7 @@ impl GltfLoader {
         let mut texture_handles = Vec::new();
         if gltf.textures().len() == 1 || cfg!(target_arch = "wasm32") {
             for texture in gltf.textures() {
-                let image = load_image(
+                let result = load_image(
                     texture.clone(),
                     &buffer_data,
                     &linear_textures,
@@ -604,7 +604,20 @@ impl GltfLoader {
                     default_sampler,
                     settings,
                 )
-                .await?;
+                .await;
+                let image = match result {
+                    Ok(image) => image,
+                    Err(err) => {
+                        // Try extension fallback loaders (e.g. for Basis Universal KTX2)
+                        if let Some(img) = try_extension_image_load(
+                            &texture, &buffer_data, &linear_textures, default_sampler, settings, &mut extensions,
+                        ) {
+                            img
+                        } else {
+                            return Err(err);
+                        }
+                    }
+                };
                 image.process_loaded_texture(load_context, &mut texture_handles);
                 // let extensions handle texture data
                 for extension in extensions.iter_mut() {
@@ -636,16 +649,25 @@ impl GltfLoader {
                 .into_iter()
                 // order is preserved if the futures are only spawned from the root scope
                 .zip(gltf.textures())
-                .for_each(|(result, texture)| match result {
-                    Ok(image) => {
-                        image.process_loaded_texture(load_context, &mut texture_handles);
-                        // let extensions handle texture data
-                        for extension in extensions.iter_mut() {
-                            extension.on_texture(&texture, texture_handles.last().unwrap().clone());
+                .for_each(|(result, texture)| {
+                    let image = match result {
+                        Ok(image) => image,
+                        Err(err) => {
+                            // Try extension fallback loaders (e.g. for Basis Universal KTX2)
+                            if let Some(img) = try_extension_image_load(
+                                &texture, &buffer_data, &linear_textures, default_sampler, settings, &mut extensions,
+                            ) {
+                                img
+                            } else {
+                                warn!("Error loading glTF texture: {}", err);
+                                return;
+                            }
                         }
-                    }
-                    Err(err) => {
-                        warn!("Error loading glTF texture: {}", err);
+                    };
+                    image.process_loaded_texture(load_context, &mut texture_handles);
+                    // let extensions handle texture data
+                    for extension in extensions.iter_mut() {
+                        extension.on_texture(&texture, texture_handles.last().unwrap().clone());
                     }
                 });
         }
@@ -1109,6 +1131,50 @@ impl AssetLoader for GltfLoader {
     fn extensions(&self) -> &[&str] {
         &["gltf", "glb"]
     }
+}
+
+/// Try loading an embedded texture through extension fallback loaders.
+///
+/// Called when the default `Image::from_buffer` fails (e.g. for Basis Universal
+/// compressed KTX2 textures). Iterates through registered extensions and returns
+/// the first successful result.
+fn try_extension_image_load(
+    gltf_texture: &gltf::Texture,
+    buffer_data: &[Vec<u8>],
+    linear_textures: &HashSet<usize>,
+    default_sampler: &ImageSamplerDescriptor,
+    settings: &GltfLoaderSettings,
+    extensions: &mut [Box<dyn extensions::GltfExtensionHandler>],
+) -> Option<ImageOrPath> {
+    let source = gltf_texture.source().source();
+    let (buffer, mime_type) = match source {
+        Source::View { view, mime_type } => {
+            let start = view.offset();
+            let end = view.offset() + view.length();
+            (&buffer_data[view.buffer().index()][start..end], mime_type)
+        }
+        _ => return None,
+    };
+    let is_srgb = !linear_textures.contains(&gltf_texture.index());
+    let sampler_descriptor = if settings.override_sampler {
+        default_sampler.clone()
+    } else {
+        texture_sampler(gltf_texture, default_sampler)
+    };
+    for extension in extensions.iter_mut() {
+        if let Some(image) = extension.on_load_image(
+            buffer,
+            mime_type,
+            is_srgb,
+            ImageSampler::Descriptor(sampler_descriptor.clone()),
+        ) {
+            return Some(ImageOrPath::Image {
+                image,
+                label: GltfAssetLabel::Texture(gltf_texture.index()),
+            });
+        }
+    }
+    None
 }
 
 /// Loads a glTF texture as a bevy [`Image`] and returns it together with its label.

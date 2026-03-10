@@ -13,6 +13,7 @@ use bevy_ecs::{
     resource::Resource,
     world::{EntityWorldMut, World},
 };
+use bevy_image::{Image, ImageSampler};
 use bevy_pbr::StandardMaterial;
 use gltf::Node;
 
@@ -96,6 +97,27 @@ pub trait GltfExtensionHandler: Send + Sync {
         named_animations: &HashMap<Box<str>, Handle<AnimationClip>>,
         animation_roots: &HashSet<usize>,
     ) {
+    }
+
+    /// Called when the default image loader fails to decode an embedded texture.
+    ///
+    /// This allows extensions to provide alternative image decoders — for example,
+    /// to transcode Basis Universal compressed KTX2 textures that the built-in
+    /// loader doesn't support.
+    ///
+    /// Return `Some(Image)` to provide the decoded image, or `None` to skip.
+    #[expect(
+        unused,
+        reason = "default trait implementations do not use the arguments because they are no-ops"
+    )]
+    fn on_load_image(
+        &mut self,
+        buffer: &[u8],
+        mime_type: &str,
+        is_srgb: bool,
+        sampler: ImageSampler,
+    ) -> Option<Image> {
+        None
     }
 
     /// Called when an individual texture is processed
