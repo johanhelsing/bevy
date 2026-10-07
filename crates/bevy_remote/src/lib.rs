@@ -528,6 +528,21 @@
 //! Arbitrary system parameters can be used in conjunction with the optional `Value` input. The
 //! handler system will always run with exclusive `World` access.
 //!
+//! A method whose answer takes frames to produce, such as one that waits for a screenshot, is
+//! added with [`RemotePlugin::with_deferred_method_main`] instead. Its handler is given the whole
+//! [`BrpMessage`], reply channel included, and may keep it and answer in any later frame:
+//! ```
+//! # use bevy_ecs::prelude::{In, ResMut, Resource};
+//! # use bevy_remote::BrpMessage;
+//! #[derive(Resource, Default)]
+//! struct Pending(Vec<BrpMessage>);
+//!
+//! fn handler(In(message): In<BrpMessage>, mut pending: ResMut<Pending>) {
+//!     // Answered later by a system that sends on `message.sender`.
+//!     pending.0.push(message);
+//! }
+//! ```
+//!
 //! [the `serde` documentation]: https://serde.rs/
 //! [fully-qualified type names]: bevy_reflect::TypePath::type_path
 //! [fully-qualified type name]: bevy_reflect::TypePath::type_path
@@ -664,6 +679,51 @@ impl RemotePlugin {
         .push((
             name.into(),
             RemoteMethodHandler::Watching(Box::new(IntoSystem::into_system(handler))),
+        ));
+        self
+    }
+
+    /// Add a remote method with a deferred handler to the plugin using the given `name` to main app.
+    ///
+    /// See [`RemoteMethodSystemId::Deferred`].
+    #[inline]
+    pub fn with_deferred_method_main<M>(
+        self,
+        name: impl Into<String>,
+        handler: impl IntoSystem<In<BrpMessage>, (), M>,
+    ) -> Self {
+        self.with_deferred_method(name, handler, true)
+    }
+
+    /// Add a remote method with a deferred handler to the plugin using the given `name` to render app.
+    ///
+    /// See [`RemoteMethodSystemId::Deferred`].
+    #[inline]
+    pub fn with_deferred_method_render<M>(
+        self,
+        name: impl Into<String>,
+        handler: impl IntoSystem<In<BrpMessage>, (), M>,
+    ) -> Self {
+        self.with_deferred_method(name, handler, false)
+    }
+
+    /// Add a remote method with a deferred handler to the plugin using the given `name` to given app.
+    #[must_use]
+    fn with_deferred_method<M>(
+        mut self,
+        name: impl Into<String>,
+        handler: impl IntoSystem<In<BrpMessage>, (), M>,
+        to_main: bool,
+    ) -> Self {
+        (if to_main {
+            self.methods.get_mut()
+        } else {
+            self.render_methods.get_mut()
+        })
+        .unwrap()
+        .push((
+            name.into(),
+            RemoteMethodHandler::Deferred(Box::new(IntoSystem::into_system(handler))),
         ));
         self
     }
@@ -817,6 +877,9 @@ impl Plugin for RemotePlugin {
                     RemoteMethodHandler::Watching(system) => RemoteMethodSystemId::Watching(
                         app.main_mut().world_mut().register_boxed_system(system),
                     ),
+                    RemoteMethodHandler::Deferred(system) => RemoteMethodSystemId::Deferred(
+                        app.main_mut().world_mut().register_boxed_system(system),
+                    ),
                 },
             );
         }
@@ -874,6 +937,9 @@ impl Plugin for RemotePlugin {
                         RemoteMethodHandler::Watching(system) => RemoteMethodSystemId::Watching(
                             render_app.world_mut().register_boxed_system(system),
                         ),
+                        RemoteMethodHandler::Deferred(system) => RemoteMethodSystemId::Deferred(
+                            render_app.world_mut().register_boxed_system(system),
+                        ),
                     },
                 );
             }
@@ -928,6 +994,8 @@ pub enum RemoteMethodHandler {
     Instant(Box<dyn System<In = In<Option<Value>>, Out = BrpResult>>),
     /// A handler that watches for changes and response when a change is detected.
     Watching(Box<dyn System<In = In<Option<Value>>, Out = BrpResult<Option<Value>>>>),
+    /// A handler that is given the request's reply channel and answers when it is ready.
+    Deferred(Box<dyn System<In = In<BrpMessage>, Out = ()>>),
 }
 
 /// The [`SystemId`] of a function that implements a remote instant method (`world.get_components`, `world.query`, etc.)
@@ -949,6 +1017,17 @@ pub type RemoteInstantMethodSystemId = SystemId<In<Option<Value>>, BrpResult>;
 /// handler is done in the [`RemotePlugin`].
 pub type RemoteWatchingMethodSystemId = SystemId<In<Option<Value>>, BrpResult<Option<Value>>>;
 
+/// The [`SystemId`] of a function that implements a remote deferred method.
+///
+/// The handler is given the whole [`BrpMessage`], including the
+/// [`sender`](BrpMessage::sender) its answer goes on, and runs once per request.
+/// It may answer before it returns, or keep the message (in a resource, say)
+/// and answer in any later frame, for a request whose answer takes frames to
+/// produce, such as a screenshot. Bevy never answers for it. The request is
+/// answered once: send one [`BrpResult`] on the sender. Dropping the sender
+/// unanswered fails the request.
+pub type RemoteDeferredMethodSystemId = SystemId<In<BrpMessage>>;
+
 /// The [`SystemId`] of a function that can be used as a remote method.
 #[derive(Debug, Clone, Copy)]
 pub enum RemoteMethodSystemId {
@@ -956,6 +1035,8 @@ pub enum RemoteMethodSystemId {
     Instant(RemoteInstantMethodSystemId),
     /// A handler that watches for changes and response when a change is detected.
     Watching(RemoteWatchingMethodSystemId),
+    /// A handler that is given the request's reply channel and answers when it is ready.
+    Deferred(RemoteDeferredMethodSystemId),
 }
 
 /// Holds all implementations of methods known to the server.
@@ -1518,6 +1599,16 @@ fn process_remote_requests(world: &mut World) {
                     .0
                     .push((message, id));
             }
+            RemoteMethodSystemId::Deferred(id) => {
+                let sender = message.sender.clone();
+                if let Err(error) = world.run_system_with(id, message) {
+                    let _ = sender.force_send(Err(BrpError {
+                        code: error_codes::INTERNAL_ERROR,
+                        message: format!("Failed to run method handler: {error}"),
+                        data: None,
+                    }));
+                }
+            }
         }
     }
 }
@@ -1589,8 +1680,50 @@ fn cache_schedule_build_metadata(
 
 #[cfg(test)]
 mod tests {
-    use crate::BrpRequest;
+    use crate::{BrpMessage, BrpRequest, BrpSender, RemotePlugin};
+    use bevy_app::App;
+    use bevy_ecs::prelude::{In, ResMut, Resource};
     use serde_json::json;
+
+    #[derive(Resource, Default)]
+    struct Pending(Vec<BrpMessage>);
+
+    #[test]
+    fn deferred_method_answers_in_a_later_frame() {
+        let mut app = App::new();
+        app.init_resource::<Pending>().add_plugins(
+            RemotePlugin::default().with_deferred_method_main(
+                "test/deferred",
+                |In(message): In<BrpMessage>, mut pending: ResMut<Pending>| {
+                    pending.0.push(message);
+                },
+            ),
+        );
+        app.update();
+
+        let (sender, receiver) = async_channel::bounded(1);
+        app.world()
+            .resource::<BrpSender>()
+            .try_send(BrpMessage {
+                method: "test/deferred".to_string(),
+                params: Some(json!(7)),
+                sender,
+            })
+            .unwrap();
+        app.update();
+        app.update();
+        assert!(
+            receiver.try_recv().is_err(),
+            "answered before the handler did"
+        );
+
+        let message = app.world_mut().resource_mut::<Pending>().0.pop().unwrap();
+        assert_eq!(message.params, Some(json!(7)));
+        message.sender.try_send(Ok(json!("done"))).unwrap();
+        app.update();
+        assert_eq!(receiver.try_recv().unwrap().unwrap(), json!("done"));
+        assert!(app.world().resource::<Pending>().0.is_empty());
+    }
 
     #[test]
     fn deserialize_brp_request_params_optional() {
