@@ -52,6 +52,7 @@ pub use audio_source::*;
 pub use pitch::*;
 pub use volume::*;
 
+pub use rodio::mixer::MixerSource;
 pub use rodio::{cpal::Sample as CpalSample, source::Source, ChannelCount, Sample, SampleRate};
 pub use sinks::*;
 
@@ -60,6 +61,7 @@ use bevy_asset::{Asset, AssetApp};
 use bevy_ecs::prelude::*;
 use bevy_transform::TransformSystems;
 
+pub use audio_output::AudioOutput;
 use audio_output::*;
 
 /// Set for the audio playback systems, so they can share a run condition

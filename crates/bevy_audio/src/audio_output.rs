@@ -6,15 +6,26 @@ use bevy_asset::{Asset, Assets};
 use bevy_ecs::{prelude::*, system::SystemParam};
 use bevy_math::Vec3;
 use bevy_transform::prelude::GlobalTransform;
-use rodio::{DeviceSinkBuilder, MixerDeviceSink, Player, Source, SpatialPlayer};
+use rodio::{
+    mixer::{Mixer, MixerSource},
+    ChannelCount, DeviceSinkBuilder, MixerDeviceSink, Player, SampleRate, Source, SpatialPlayer,
+};
 use tracing::warn;
 
 use crate::{AudioSink, AudioSinkPlayback};
 
-/// Used internally to play audio on the current "audio device"
+/// Where every sound is mixed and sent: the default audio device, or a mixer
+/// the app pulls samples from itself ([`AudioOutput::pulled`]).
+///
+/// [`AudioPlugin`](crate::AudioPlugin) inserts the device output unless one is
+/// already there, so an app that wants another inserts it before the plugin.
 #[derive(Resource)]
-pub(crate) struct AudioOutput {
-    stream: Option<MixerDeviceSink>,
+pub struct AudioOutput {
+    /// Where the players connect. `None` when there is no device to play to.
+    mixer: Option<Mixer>,
+    /// Keeps the device stream open while the output lives; `None` for a
+    /// pulled output, which has no device.
+    _stream: Option<MixerDeviceSink>,
 }
 
 impl Default for AudioOutput {
@@ -28,7 +39,32 @@ impl Default for AudioOutput {
                 s
             })
             .ok();
-        Self { stream }
+        Self {
+            mixer: stream.as_ref().map(|s| s.mixer().clone()),
+            _stream: stream,
+        }
+    }
+}
+
+impl AudioOutput {
+    /// An output that opens no device and plays nothing by itself: every sound
+    /// is mixed into the returned [`MixerSource`], and the app pulls samples
+    /// from it when it wants them, as many as it wants. Time passes for the
+    /// sounds only as samples are pulled, so a renderer that pulls one frame's
+    /// worth per frame gets the mix the player would have heard, exactly in
+    /// step with its frames, with no device and at any speed.
+    ///
+    /// With no sound playing the source yields `None`; pull on, it yields
+    /// again once a sound starts.
+    pub fn pulled(channels: ChannelCount, sample_rate: SampleRate) -> (Self, MixerSource) {
+        let (mixer, source) = rodio::mixer::mixer(channels, sample_rate);
+        (
+            Self {
+                mixer: Some(mixer),
+                _stream: None,
+            },
+            source,
+        )
     }
 }
 
@@ -100,11 +136,10 @@ pub(crate) fn play_queued_audio_system<Source: Asset + Decodable>(
 ) where
     f32: rodio::cpal::FromSample<rodio::Sample>,
 {
-    let Some(stream) = audio_output.stream.as_ref() else {
+    let Some(mixer) = audio_output.mixer.as_ref() else {
         // audio output unavailable; cannot play sound
         return;
     };
-    let mixer = stream.mixer();
 
     for (entity, source_handle, settings, maybe_emitter_transform) in &query_nonplaying {
         let Some(audio_source) = audio_sources.get(&source_handle.0) else {
@@ -334,7 +369,7 @@ pub(crate) fn cleanup_finished_audio<T: Decodable + Asset>(
 
 /// Run Condition to only play audio if the audio output is available
 pub(crate) fn audio_output_available(audio_output: Res<AudioOutput>) -> bool {
-    audio_output.stream.is_some()
+    audio_output.mixer.is_some()
 }
 
 /// Updates spatial audio sinks when emitter positions change.
