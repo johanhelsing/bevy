@@ -103,6 +103,9 @@ use core::slice;
     reflect(Serialize, Deserialize)
 )]
 #[relationship(relationship_target = Children)]
+// cargo-space: a rollback save skips a table whose summary tick did not move
+// since the last save (bevy_ggrs); ChildOf is rolled back.
+#[component(summary_tick)]
 #[doc(alias = "IsChild", alias = "Parent")]
 pub struct ChildOf(#[entities] pub Entity);
 
