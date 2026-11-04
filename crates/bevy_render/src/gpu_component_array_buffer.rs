@@ -190,9 +190,11 @@ fn update_components<C>(
                     // mesh, which isn't presently supported).
                     let tag = component_array.len();
                     component_array.push(&mut buffer, entity, data);
+                    // The entity may be despawned this frame, as a displaced
+                    // one may above.
                     commands
                         .entity(entity)
-                        .insert(MeshTag::with_type::<GpuComponentArray<C>>(tag as u32));
+                        .try_insert(MeshTag::with_type::<GpuComponentArray<C>>(tag as u32));
                 }
             }
         }
