@@ -274,6 +274,8 @@ pub struct TypedReflectDeserializer<'a, P: ReflectDeserializerProcessor = ()> {
     registration: &'a TypeRegistration,
     registry: &'a TypeRegistry,
     processor: Option<&'a mut P>,
+    /// See [`as_read`](Self::as_read).
+    as_read: bool,
 }
 
 impl<'a> TypedReflectDeserializer<'a, ()> {
@@ -291,6 +293,7 @@ impl<'a> TypedReflectDeserializer<'a, ()> {
             registration,
             registry,
             processor: None,
+            as_read: false,
         }
     }
 
@@ -309,6 +312,7 @@ impl<'a> TypedReflectDeserializer<'a, ()> {
             registration,
             registry,
             processor: None,
+            as_read: false,
         }
     }
 }
@@ -332,7 +336,24 @@ impl<'a, P: ReflectDeserializerProcessor> TypedReflectDeserializer<'a, P> {
             registration,
             registry,
             processor: Some(processor),
+            as_read: false,
         }
+    }
+
+    /// Leaves the value as it was read: a dynamic value holding what the
+    /// input named and nothing else, where [`deserialize`] would otherwise
+    /// make it the concrete type through [`FromReflect`], which fills a
+    /// field the input did not name from the type's `Default` and so
+    /// forgets it was missing. For a caller that fills missing fields from
+    /// elsewhere before it converts. Only this value: what it holds is
+    /// still converted, and a type that registers [`ReflectDeserialize`] is
+    /// read by it as ever.
+    ///
+    /// [`deserialize`]: DeserializeSeed::deserialize
+    /// [`FromReflect`]: crate::FromReflect
+    pub fn as_read(mut self) -> Self {
+        self.as_read = true;
+        self
     }
 
     /// An internal constructor for creating a deserializer without resetting the type info stack.
@@ -345,6 +366,7 @@ impl<'a, P: ReflectDeserializerProcessor> TypedReflectDeserializer<'a, P> {
             registration,
             registry,
             processor,
+            as_read: false,
         }
     }
 }
@@ -519,7 +541,8 @@ impl<'de, P: ReflectDeserializerProcessor> DeserializeSeed<'de>
             };
 
             // Try to produce a concrete instance of the type to deserialize by using the reflected `FromReflect`.
-            if let Some(from_reflect) = self.registration.data::<ReflectFromReflect>()
+            if !self.as_read
+                && let Some(from_reflect) = self.registration.data::<ReflectFromReflect>()
                 && let Some(value) = from_reflect.from_reflect(&*dynamic_value)
             {
                 return Ok(value);

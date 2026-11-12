@@ -225,6 +225,55 @@ pub struct WorldDeserializer<'a> {
     pub load_from_path: &'a mut dyn LoadFromPath,
 }
 
+/// Which map of a serialized world a [`FillWorldMap`] is handed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WorldMap {
+    /// The world's resources.
+    Resources,
+    /// One entity's components.
+    Components,
+}
+
+/// Called with each map of a serialized world once all its values are read
+/// and before any becomes its concrete type: the resources, then each
+/// entity's components. A struct that does not register `ReflectDeserialize`
+/// is still a dynamic struct here, holding the fields the input named and no
+/// others, so the function can tell a missing field from one written at its
+/// default and fill it from somewhere else than the type's `Default` (what
+/// another component of the entity requires, say). What it leaves as it is
+/// becomes its type through `FromReflect` afterwards, as without it.
+pub type FillWorldMap = fn(WorldMap, &mut [Box<dyn PartialReflect>], &TypeRegistry);
+
+/// A [`WorldDeserializer`] that hands every map to a [`FillWorldMap`] before
+/// its values become their types.
+pub struct FilledWorldDeserializer<'a> {
+    /// Type registry in which the components and resources types used in the world to deserialize are registered.
+    pub type_registry: &'a TypeRegistry,
+    /// The [`LoadFromPath`] implementation allowing us to deserialize asset handles.
+    pub load_from_path: &'a mut dyn LoadFromPath,
+    /// Fills what the input left out of each map.
+    pub fill: FillWorldMap,
+}
+
+impl<'a, 'de> DeserializeSeed<'de> for FilledWorldDeserializer<'a> {
+    type Value = DynamicWorld;
+
+    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_struct(
+            WORLD_STRUCT,
+            &[WORLD_RESOURCES, WORLD_ENTITIES],
+            WorldVisitor {
+                type_registry: self.type_registry,
+                load_from_path: self.load_from_path,
+                fill: Some(self.fill),
+            },
+        )
+    }
+}
+
 impl<'a, 'de> DeserializeSeed<'de> for WorldDeserializer<'a> {
     type Value = DynamicWorld;
 
@@ -238,6 +287,7 @@ impl<'a, 'de> DeserializeSeed<'de> for WorldDeserializer<'a> {
             WorldVisitor {
                 type_registry: self.type_registry,
                 load_from_path: self.load_from_path,
+                fill: None,
             },
         )
     }
@@ -246,6 +296,7 @@ impl<'a, 'de> DeserializeSeed<'de> for WorldDeserializer<'a> {
 struct WorldVisitor<'a> {
     type_registry: &'a TypeRegistry,
     load_from_path: &'a mut dyn LoadFromPath,
+    fill: Option<FillWorldMap>,
 }
 
 impl<'a, 'de> Visitor<'de> for WorldVisitor<'a> {
@@ -263,6 +314,7 @@ impl<'a, 'de> Visitor<'de> for WorldVisitor<'a> {
             .next_element_seed(WorldMapDeserializer {
                 registry: self.type_registry,
                 load_from_path: self.load_from_path,
+                fill: self.fill.map(|fill| (WorldMap::Resources, fill)),
             })?
             .ok_or_else(|| Error::missing_field(WORLD_RESOURCES))?;
 
@@ -270,6 +322,7 @@ impl<'a, 'de> Visitor<'de> for WorldVisitor<'a> {
             .next_element_seed(WorldEntitiesDeserializer {
                 type_registry: self.type_registry,
                 load_from_path: self.load_from_path,
+                fill: self.fill,
             })?
             .ok_or_else(|| Error::missing_field(WORLD_ENTITIES))?;
 
@@ -294,6 +347,7 @@ impl<'a, 'de> Visitor<'de> for WorldVisitor<'a> {
                     resources = Some(map.next_value_seed(WorldMapDeserializer {
                         registry: self.type_registry,
                         load_from_path: self.load_from_path,
+                        fill: self.fill.map(|fill| (WorldMap::Resources, fill)),
                     })?);
                 }
                 WorldField::Entities => {
@@ -303,6 +357,7 @@ impl<'a, 'de> Visitor<'de> for WorldVisitor<'a> {
                     entities = Some(map.next_value_seed(WorldEntitiesDeserializer {
                         type_registry: self.type_registry,
                         load_from_path: self.load_from_path,
+                        fill: self.fill,
                     })?);
                 }
             }
@@ -324,6 +379,8 @@ pub struct WorldEntitiesDeserializer<'a> {
     pub type_registry: &'a TypeRegistry,
     /// The [`LoadFromPath`] implementation allowing us to deserialize asset handles.
     pub load_from_path: &'a mut dyn LoadFromPath,
+    /// Handed each entity's components before they become their types.
+    pub fill: Option<FillWorldMap>,
 }
 
 impl<'a, 'de> DeserializeSeed<'de> for WorldEntitiesDeserializer<'a> {
@@ -336,6 +393,7 @@ impl<'a, 'de> DeserializeSeed<'de> for WorldEntitiesDeserializer<'a> {
         deserializer.deserialize_map(WorldEntitiesVisitor {
             type_registry: self.type_registry,
             load_from_path: self.load_from_path,
+            fill: self.fill,
         })
     }
 }
@@ -343,6 +401,7 @@ impl<'a, 'de> DeserializeSeed<'de> for WorldEntitiesDeserializer<'a> {
 struct WorldEntitiesVisitor<'a> {
     type_registry: &'a TypeRegistry,
     load_from_path: &'a mut dyn LoadFromPath,
+    fill: Option<FillWorldMap>,
 }
 
 impl<'a, 'de> Visitor<'de> for WorldEntitiesVisitor<'a> {
@@ -362,6 +421,7 @@ impl<'a, 'de> Visitor<'de> for WorldEntitiesVisitor<'a> {
                 entity,
                 type_registry: self.type_registry,
                 load_from_path: self.load_from_path,
+                fill: self.fill,
             })?;
             entities.push(entity);
         }
@@ -378,6 +438,8 @@ pub struct WorldEntityDeserializer<'a> {
     pub type_registry: &'a TypeRegistry,
     /// The [`LoadFromPath`] implementation allowing us to deserialize asset handles.
     pub load_from_path: &'a mut dyn LoadFromPath,
+    /// Handed the entity's components before they become their types.
+    pub fill: Option<FillWorldMap>,
 }
 
 impl<'a, 'de> DeserializeSeed<'de> for WorldEntityDeserializer<'a> {
@@ -394,6 +456,7 @@ impl<'a, 'de> DeserializeSeed<'de> for WorldEntityDeserializer<'a> {
                 entity: self.entity,
                 registry: self.type_registry,
                 load_from_path: self.load_from_path,
+                fill: self.fill,
             },
         )
     }
@@ -403,6 +466,7 @@ struct WorldEntityVisitor<'a> {
     entity: Entity,
     registry: &'a TypeRegistry,
     load_from_path: &'a mut dyn LoadFromPath,
+    fill: Option<FillWorldMap>,
 }
 
 impl<'a, 'de> Visitor<'de> for WorldEntityVisitor<'a> {
@@ -420,6 +484,7 @@ impl<'a, 'de> Visitor<'de> for WorldEntityVisitor<'a> {
             .next_element_seed(WorldMapDeserializer {
                 registry: self.registry,
                 load_from_path: self.load_from_path,
+                fill: self.fill.map(|fill| (WorldMap::Components, fill)),
             })?
             .ok_or_else(|| Error::missing_field(ENTITY_FIELD_COMPONENTS))?;
 
@@ -444,6 +509,7 @@ impl<'a, 'de> Visitor<'de> for WorldEntityVisitor<'a> {
                     components = Some(map.next_value_seed(WorldMapDeserializer {
                         registry: self.registry,
                         load_from_path: self.load_from_path,
+                        fill: self.fill.map(|fill| (WorldMap::Components, fill)),
                     })?);
                 }
             }
@@ -465,6 +531,9 @@ pub struct WorldMapDeserializer<'a> {
     pub registry: &'a TypeRegistry,
     /// The [`LoadFromPath`] implementation allowing us to deserialize asset handles.
     pub load_from_path: &'a mut dyn LoadFromPath,
+    /// Which map this is, and what is handed its values before they become
+    /// their types.
+    pub fill: Option<(WorldMap, FillWorldMap)>,
 }
 
 impl<'a, 'de> DeserializeSeed<'de> for WorldMapDeserializer<'a> {
@@ -477,6 +546,7 @@ impl<'a, 'de> DeserializeSeed<'de> for WorldMapDeserializer<'a> {
         deserializer.deserialize_map(WorldMapVisitor {
             registry: self.registry,
             load_from_path: self.load_from_path,
+            fill: self.fill,
         })
     }
 }
@@ -484,6 +554,7 @@ impl<'a, 'de> DeserializeSeed<'de> for WorldMapDeserializer<'a> {
 struct WorldMapVisitor<'a> {
     registry: &'a TypeRegistry,
     load_from_path: &'a mut dyn LoadFromPath,
+    fill: Option<(WorldMap, FillWorldMap)>,
 }
 
 impl<'a, 'de> Visitor<'de> for WorldMapVisitor<'a> {
@@ -521,24 +592,40 @@ impl<'a, 'de> Visitor<'de> for WorldMapVisitor<'a> {
                 )));
             }
 
-            let value = map.next_value_seed(TypedReflectDeserializer::with_processor(
-                registration,
-                self.registry,
-                &mut HandleDeserializeProcessor {
-                    load_from_path: self.load_from_path,
-                },
-            ))?;
-
-            // Attempt to convert using FromReflect.
-            let value = self
-                .registry
-                .get(registration.type_id())
-                .and_then(|tr| tr.data::<ReflectFromReflect>())
-                .and_then(|fr| fr.from_reflect(value.as_partial_reflect()))
-                .map(PartialReflect::into_partial_reflect)
-                .unwrap_or(value);
+            // Left as read: the typed deserializer would otherwise make it
+            // its concrete type on the spot, and a `fill` could no longer
+            // tell which fields the input named.
+            let value = map.next_value_seed(
+                TypedReflectDeserializer::with_processor(
+                    registration,
+                    self.registry,
+                    &mut HandleDeserializeProcessor {
+                        load_from_path: self.load_from_path,
+                    },
+                )
+                .as_read(),
+            )?;
 
             entries.push(value);
+        }
+
+        if let Some((map, fill)) = self.fill {
+            fill(map, &mut entries, self.registry);
+        }
+
+        // Attempt to convert using FromReflect.
+        for value in &mut entries {
+            if !value.is_dynamic() {
+                continue;
+            }
+            let converted = value
+                .get_represented_type_info()
+                .and_then(|info| self.registry.get(info.type_id()))
+                .and_then(|tr| tr.data::<ReflectFromReflect>())
+                .and_then(|fr| fr.from_reflect(value.as_partial_reflect()));
+            if let Some(converted) = converted {
+                *value = converted.into_partial_reflect();
+            }
         }
 
         Ok(entries)
@@ -1097,5 +1184,62 @@ mod tests {
 
             assert_world_eq(&a, &b);
         }
+    }
+
+    /// A fill is handed each map with a struct still the fields the input
+    /// named, and what it puts in is what the value becomes.
+    #[test]
+    fn fill_sees_the_fields_the_input_named() {
+        use crate::serde::{FilledWorldDeserializer, WorldMap};
+        use bevy_reflect::{
+            prelude::ReflectDefault,
+            structs::{DynamicStruct, Struct},
+            PartialReflect, ReflectRef, TypeRegistry,
+        };
+
+        #[derive(Component, Reflect, Default)]
+        #[reflect(Component, Default)]
+        struct Named {
+            a: i32,
+            b: i32,
+        }
+
+        fn fill(map: WorldMap, values: &mut [Box<dyn PartialReflect>], _: &TypeRegistry) {
+            assert_eq!(map == WorldMap::Resources, values.is_empty());
+            for value in values {
+                let ReflectRef::Struct(fields) = value.reflect_ref() else {
+                    panic!("expected a struct");
+                };
+                assert!(value.is_dynamic());
+                assert!(fields.field("b").is_none());
+                let mut whole: DynamicStruct = fields.to_dynamic_struct().unwrap();
+                whole.insert("b", 9_i32);
+                *value = Box::new(whole);
+            }
+        }
+
+        let mut registry = TypeRegistry::default();
+        registry.register::<Named>();
+        let input = r#"(
+  resources: {},
+  entities: {
+    8589934591: (
+      components: {
+        "bevy_world_serialization::serde::tests::Named": (a: 1),
+      },
+    ),
+  },
+)"#;
+        let world = FilledWorldDeserializer {
+            type_registry: &registry,
+            load_from_path: &mut FakeHandleCreator,
+            fill,
+        }
+        .deserialize(&mut ron::de::Deserializer::from_str(input).unwrap())
+        .unwrap();
+        let named = world.entities[0].components[0]
+            .try_downcast_ref::<Named>()
+            .unwrap();
+        assert_eq!((named.a, named.b), (1, 9));
     }
 }

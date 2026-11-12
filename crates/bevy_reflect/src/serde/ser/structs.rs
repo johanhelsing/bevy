@@ -3,6 +3,7 @@ use crate::{
     structs::Struct,
     TypeInfo, TypeRegistry,
 };
+use alloc::vec::Vec;
 use serde::{ser::SerializeStruct, Serialize};
 
 use super::ReflectSerializerProcessor;
@@ -42,6 +43,35 @@ impl<P: ReflectSerializerProcessor> Serialize for StructSerializer<'_, P> {
             .registry
             .get(type_info.type_id())
             .and_then(|registration| registration.data::<SerializationData>());
+        // A dynamic struct may hold some of its type's fields, or hold them
+        // in another order, so its nth field is not the type's nth: each is
+        // written under its own name. A concrete one holds them all in the
+        // type's order, and is walked by index below.
+        if self.struct_value.is_dynamic() {
+            let mut fields = Vec::with_capacity(self.struct_value.field_len());
+            for (name, value) in self.struct_value.iter_fields() {
+                let index = struct_info.index_of(name).ok_or_else(|| {
+                    make_custom_error(format_args!(
+                        "no field named `{name}` on struct `{}`",
+                        struct_info.type_path(),
+                    ))
+                })?;
+                if serialization_data.is_some_and(|data| data.is_field_skipped(index)) {
+                    continue;
+                }
+                fields.push((struct_info.field_at(index).unwrap().name(), value));
+            }
+            let mut state = serializer
+                .serialize_struct(struct_info.type_path_table().ident().unwrap(), fields.len())?;
+            for (key, value) in fields {
+                state.serialize_field(
+                    key,
+                    &TypedReflectSerializer::new_internal(value, self.registry, self.processor),
+                )?;
+            }
+            return state.end();
+        }
+
         let ignored_len = serialization_data.map(SerializationData::len).unwrap_or(0);
         let mut state = serializer.serialize_struct(
             struct_info.type_path_table().ident().unwrap(),

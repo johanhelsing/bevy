@@ -913,4 +913,47 @@ mod tests {
             );
         }
     }
+
+    /// `as_read` keeps a struct the fields the input named, where the
+    /// deserializer otherwise makes it its type, a missing field filled from
+    /// `Default`.
+    #[test]
+    fn as_read_keeps_a_struct_the_fields_the_input_named() {
+        use crate::{std_traits::ReflectDefault, structs::Struct, ReflectRef};
+
+        #[derive(Reflect)]
+        #[reflect(Default)]
+        struct Two {
+            a: i32,
+            b: i32,
+        }
+
+        impl Default for Two {
+            fn default() -> Self {
+                Self { a: 0, b: 7 }
+            }
+        }
+
+        let mut registry = TypeRegistry::default();
+        registry.register::<Two>();
+        let registration = registry.get(TypeId::of::<Two>()).unwrap();
+        let input = "(a: 1)";
+
+        let value = TypedReflectDeserializer::new(registration, &registry)
+            .as_read()
+            .deserialize(&mut ron::Deserializer::from_str(input).unwrap())
+            .unwrap();
+        assert!(value.is_dynamic());
+        let ReflectRef::Struct(fields) = value.reflect_ref() else {
+            panic!("expected a struct");
+        };
+        assert_eq!(fields.field_len(), 1);
+        assert!(fields.field("b").is_none());
+
+        let value = TypedReflectDeserializer::new(registration, &registry)
+            .deserialize(&mut ron::Deserializer::from_str(input).unwrap())
+            .unwrap();
+        let two = value.try_downcast_ref::<Two>().unwrap();
+        assert_eq!((two.a, two.b), (1, 7));
+    }
 }

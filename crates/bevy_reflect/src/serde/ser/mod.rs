@@ -730,4 +730,30 @@ mod tests {
             );
         }
     }
+
+    /// A dynamic struct may hold some of its type's fields, in any order: each
+    /// is written under its own name, not the name of the type's field at the
+    /// same index.
+    #[test]
+    fn dynamic_struct_serializes_the_fields_it_holds_by_name() {
+        use crate::{serde::TypedReflectSerializer, structs::DynamicStruct, Typed};
+
+        #[derive(Reflect)]
+        struct Three {
+            a: i32,
+            b: i32,
+            c: i32,
+        }
+
+        let mut registry = TypeRegistry::default();
+        registry.register::<Three>();
+
+        let mut some = DynamicStruct::default();
+        some.set_represented_type(Some(Three::type_info()));
+        some.insert("c", 3_i32);
+        some.insert("a", 1_i32);
+
+        let output = ron::to_string(&TypedReflectSerializer::new(&some, &registry)).unwrap();
+        assert_eq!(output, "(c:3,a:1)");
+    }
 }
