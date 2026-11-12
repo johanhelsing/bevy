@@ -35,7 +35,8 @@ use bevy_platform::hash::FixedHasher;
 use bevy_reflect::{prelude::ReflectDefault, Reflect};
 use bevy_render::camera::{DirtySpecializationSystems, DirtySpecializations, PendingQueues};
 use bevy_render::erased_render_asset::{
-    ErasedRenderAsset, ErasedRenderAssetPlugin, ErasedRenderAssets, PrepareAssetError,
+    AfterRenderAssets, ErasedRenderAsset, ErasedRenderAssetPlugin, ErasedRenderAssets,
+    PrepareAssetError,
 };
 use bevy_render::material_bind_groups::{
     material_uses_bindless_resources, FallbackBuffer, MaterialBindGroupAllocators,
@@ -43,6 +44,7 @@ use bevy_render::material_bind_groups::{
 };
 use bevy_render::storage::GpuShaderBuffer;
 use bevy_render::sync_world::MainEntityHashSet;
+use bevy_render::texture::GpuImage;
 use bevy_render::view::{RenderVisibleEntities, RetainedViewEntity};
 use bevy_render::{
     mesh::RenderMesh,
@@ -339,7 +341,10 @@ where
         app.init_asset::<M>()
             .init_resource::<EntitiesNeedingSpecialization<M>>()
             .register_type::<MeshMaterial2d<M>>()
-            .add_plugins(ErasedRenderAssetPlugin::<MeshMaterial2d<M>>::default())
+            .add_plugins(ErasedRenderAssetPlugin::<
+                MeshMaterial2d<M>,
+                AfterRenderAssets<(GpuImage, GpuShaderBuffer)>,
+            >::default())
             .add_systems(
                 PostUpdate,
                 (
@@ -1484,6 +1489,83 @@ pub fn mark_2d_meshes_as_changed_if_their_materials_changed<M>(
     for entity in removed_materials_query.read() {
         if let Ok(mut mesh) = all_meshes_query.get_mut(entity) {
             mesh.set_changed();
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::MeshMaterial2d;
+    use crate::{ColorMaterial, Material2dPlugin};
+    use bevy_app::{App, SubApp, TaskPoolPlugin};
+    use bevy_asset::AssetPlugin;
+    use bevy_ecs::schedule::{InternedSystemSet, IntoSystemSet, NodeId, Schedules, SystemSet};
+    use bevy_render::{
+        erased_render_asset::prepare_erased_assets,
+        render_asset::{prepare_assets, RenderAssetPlugin},
+        storage::GpuShaderBuffer,
+        texture::GpuImage,
+        Render, RenderApp,
+    };
+
+    /// A 2D material binds images and storage buffers, so it is prepared after
+    /// them (#23457). Otherwise an image and a material that binds it, both
+    /// replaced in one frame, are prepared in either order, and a material
+    /// prepared first keeps the image's old texture.
+    #[test]
+    fn material2d_is_prepared_after_the_images_and_buffers_it_binds() {
+        let mut app = App::new();
+        app.add_plugins((TaskPoolPlugin::default(), AssetPlugin::default()));
+        let mut render_app = SubApp::new();
+        render_app.add_schedule(Render::base_schedule());
+        app.insert_sub_app(RenderApp, render_app);
+        app.add_plugins((
+            RenderAssetPlugin::<GpuImage>::default(),
+            RenderAssetPlugin::<GpuShaderBuffer>::default(),
+            Material2dPlugin::<ColorMaterial>::default(),
+        ));
+        // `ErasedRenderAssetPlugin` adds its prepare system in `finish`.
+        app.finish();
+
+        let world = app.sub_app_mut(RenderApp).world_mut();
+        let mut schedule = world.resource_mut::<Schedules>().remove(Render).unwrap();
+        schedule.initialize(world).unwrap();
+        let graph = schedule.graph();
+        // Each function system sits in a set of its own (its `SystemTypeSet`),
+        // and `.after(f)` is an edge from `f`'s set to the system.
+        let set_of = |set: InternedSystemSet| graph.system_sets.get_key(set).unwrap();
+        let material_set = set_of(
+            prepare_erased_assets::<MeshMaterial2d<ColorMaterial>>
+                .into_system_set()
+                .intern(),
+        );
+        let material = graph
+            .hierarchy()
+            .graph()
+            .all_edges()
+            .find_map(|(from, to)| match (from, to) {
+                (NodeId::Set(set), NodeId::System(system)) if set == material_set => Some(system),
+                _ => None,
+            })
+            .unwrap();
+        for (name, dependency) in [
+            (
+                "GpuImage",
+                set_of(prepare_assets::<GpuImage>.into_system_set().intern()),
+            ),
+            (
+                "GpuShaderBuffer",
+                set_of(prepare_assets::<GpuShaderBuffer>.into_system_set().intern()),
+            ),
+        ] {
+            assert!(
+                graph
+                    .dependency()
+                    .graph()
+                    .all_edges()
+                    .any(|edge| edge == (NodeId::Set(dependency), NodeId::System(material))),
+                "2D material preparation is not ordered after prepare_assets::<{name}>"
+            );
         }
     }
 }

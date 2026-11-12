@@ -1,6 +1,6 @@
 use crate::{
-    render_resource::AsBindGroupError, ExtractSchedule, MainWorld, Render, RenderApp,
-    RenderStartup, RenderSystems, Res,
+    render_asset::RenderAssetDependency, render_resource::AsBindGroupError, ExtractSchedule,
+    MainWorld, Render, RenderApp, RenderStartup, RenderSystems, Res,
 };
 use bevy_app::{App, Plugin, SubApp};
 use bevy_asset::RenderAssetUsages;
@@ -157,6 +157,21 @@ impl ErasedRenderAssetDependency for () {
 impl<A: ErasedRenderAsset> ErasedRenderAssetDependency for A {
     fn register_system(render_app: &mut SubApp, system: ScheduleConfigs<ScheduleSystem>) {
         render_app.add_systems(Render, system.after(prepare_erased_assets::<A>));
+    }
+}
+
+/// An [`ErasedRenderAssetDependency`] on plain
+/// [`RenderAsset`](crate::render_asset::RenderAsset)s: the erased
+/// asset is prepared after them, as `RenderAssetPlugin`'s `AFTER` does
+/// (`AfterRenderAssets<(GpuImage, GpuShaderBuffer)>` for a material that binds
+/// images and buffers). Without it a material and an image it binds, both
+/// changed in one frame, are prepared in either order, and a material prepared
+/// first keeps the image's old texture.
+pub struct AfterRenderAssets<D: RenderAssetDependency>(PhantomData<fn() -> D>);
+
+impl<D: RenderAssetDependency> ErasedRenderAssetDependency for AfterRenderAssets<D> {
+    fn register_system(render_app: &mut SubApp, system: ScheduleConfigs<ScheduleSystem>) {
+        D::register_system(render_app, system);
     }
 }
 
