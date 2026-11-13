@@ -40,6 +40,8 @@ pub struct EmbeddedAssetRegistry {
     dir: Dir,
     #[cfg(feature = "embedded_watcher")]
     root_paths: Arc<RwLock<bevy_platform::collections::HashMap<Box<Path>, PathBuf>>>,
+    #[cfg(feature = "embedded_watcher")]
+    watchers: EmbeddedWatchers,
 }
 
 impl EmbeddedAssetRegistry {
@@ -65,7 +67,9 @@ impl EmbeddedAssetRegistry {
         self.root_paths
             .write()
             .unwrap_or_else(PoisonError::into_inner)
-            .insert(full_path.into(), asset_path.to_owned());
+            .insert(full_path.as_path().into(), asset_path.to_owned());
+        #[cfg(feature = "embedded_watcher")]
+        self.watchers.watch_folder_of(&full_path);
         self.dir.insert_asset(asset_path, value);
     }
 
@@ -86,6 +90,8 @@ impl EmbeddedAssetRegistry {
             .write()
             .unwrap_or_else(PoisonError::into_inner)
             .insert(full_path.into(), asset_path.to_owned());
+        #[cfg(feature = "embedded_watcher")]
+        self.watchers.watch_folder_of(full_path);
         self.dir.insert_meta(asset_path, value);
     }
 
@@ -124,14 +130,17 @@ impl EmbeddedAssetRegistry {
         #[cfg(feature = "embedded_watcher")]
         {
             let root_paths = self.root_paths.clone();
+            let watchers = self.watchers.clone();
             let dir = self.dir.clone();
             let processed_root_paths = self.root_paths.clone();
+            let processed_watchers = self.watchers.clone();
             let processed_dir = self.dir.clone();
             source = source
                 .with_watcher(move |sender| {
                     Some(Box::new(EmbeddedWatcher::new(
                         dir.clone(),
                         root_paths.clone(),
+                        watchers.clone(),
                         sender,
                         core::time::Duration::from_millis(300),
                     )))
@@ -140,6 +149,7 @@ impl EmbeddedAssetRegistry {
                     Some(Box::new(EmbeddedWatcher::new(
                         processed_dir.clone(),
                         processed_root_paths.clone(),
+                        processed_watchers.clone(),
                         sender,
                         core::time::Duration::from_millis(300),
                     )))

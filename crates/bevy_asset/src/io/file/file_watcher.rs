@@ -82,10 +82,21 @@ pub(crate) fn get_asset_path(root: &Path, absolute_path: &Path) -> (PathBuf, boo
 pub(crate) fn new_asset_event_debouncer(
     root: PathBuf,
     debounce_wait_time: Duration,
-    mut handler: impl FilesystemEventHandler,
+    handler: impl FilesystemEventHandler,
 ) -> Result<Debouncer<RecommendedWatcher, RecommendedCache>, notify::Error> {
     let root = super::get_base_path().join(root);
-    let mut debouncer = new_debouncer(
+    let mut debouncer = new_unwatched_asset_event_debouncer(debounce_wait_time, handler)?;
+    debouncer.watch(&root, RecursiveMode::Recursive)?;
+    Ok(debouncer)
+}
+
+/// [`new_asset_event_debouncer`] watching nothing yet: the caller picks what
+/// it watches with [`Debouncer::watch`].
+pub(crate) fn new_unwatched_asset_event_debouncer(
+    debounce_wait_time: Duration,
+    mut handler: impl FilesystemEventHandler,
+) -> Result<Debouncer<RecommendedWatcher, RecommendedCache>, notify::Error> {
+    new_debouncer(
         debounce_wait_time,
         None,
         move |result: DebounceEventResult| {
@@ -244,9 +255,7 @@ pub(crate) fn new_asset_event_debouncer(
                 }),
             }
         },
-    )?;
-    debouncer.watch(&root, RecursiveMode::Recursive)?;
-    Ok(debouncer)
+    )
 }
 
 pub(crate) struct FileEventHandler {
