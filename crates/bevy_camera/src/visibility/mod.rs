@@ -736,6 +736,16 @@ fn reset_view_visibility(mut reset_query: Query<&mut ViewVisibility, Without<NoC
     });
 }
 
+/// A view [`check_visibility_cpu_culling`] tests entities against this frame:
+/// an active camera's frustum and layers, copied out of the camera's query.
+#[derive(Clone)]
+pub struct CpuCullingView {
+    entity: Entity,
+    frustum: Frustum,
+    mask: RenderLayers,
+    frustum_culling: bool,
+}
+
 /// System updating the visibility of entities, other than those that have opted
 /// out of CPU culling, each frame.
 ///
@@ -743,10 +753,18 @@ fn reset_view_visibility(mut reset_query: Query<&mut ViewVisibility, Without<NoC
 /// frame, it updates the [`ViewVisibility`] of all entities, and for each view
 /// also compute the [`VisibleEntities`] for that view.
 ///
-/// To ensure that an entity is checked for visibility, make sure that it has a
-/// [`VisibilityClass`] component and that that component is nonempty.
+/// It visits each entity once and tests it against every active view in turn,
+/// so a view that shares no layer with most entities (a background or an
+/// overlay camera) costs a layer test per entity, not another pass over them.
+///
+/// An entity lands in a view's [`VisibleEntities`] only under the classes in
+/// its [`VisibilityClass`], so to be drawn from that list it needs a nonempty
+/// one. An entity with no class still gets its [`ViewVisibility`]: an app
+/// that reads that alone (a light, an occluder) leaves the class off and
+/// stays out of every view's list.
 pub fn check_visibility_cpu_culling(
-    mut thread_queues: Local<Parallel<TypeIdHashMap<Vec<Entity>>>>,
+    mut thread_queues: Local<Parallel<Vec<TypeIdHashMap<Vec<Entity>>>>>,
+    mut views: Local<Vec<CpuCullingView>>,
     mut view_query: Query<(
         Entity,
         &mut VisibleEntities,
@@ -774,94 +792,136 @@ pub fn check_visibility_cpu_culling(
 ) {
     let visible_entity_ranges = visible_entity_ranges.as_deref();
 
-    for (view, mut visible_entities, frustum, maybe_view_mask, camera, no_cpu_culling_camera) in
-        &mut view_query
-    {
-        if !camera.is_active {
-            continue;
-        }
-
-        let view_mask = maybe_view_mask.unwrap_or_default();
-
-        visible_aabb_query.par_iter_mut().for_each_init(
-            || thread_queues.borrow_local_mut(),
-            |queue, query_item| {
-                let (
+    views.clear();
+    views.extend(
+        view_query
+            .iter()
+            .filter(|(.., camera, _)| camera.is_active)
+            .map(
+                |(entity, _, frustum, maybe_view_mask, _, no_cpu_culling_camera)| CpuCullingView {
                     entity,
-                    inherited_visibility,
-                    mut view_visibility,
-                    visibility_class,
-                    maybe_entity_mask,
-                    maybe_model_aabb,
-                    maybe_model_sphere,
-                    transform,
-                    no_frustum_culling,
-                    has_visibility_range,
-                ) = query_item;
+                    frustum: *frustum,
+                    mask: maybe_view_mask.cloned().unwrap_or_default(),
+                    frustum_culling: !no_cpu_culling_camera,
+                },
+            ),
+    );
+    if views.is_empty() {
+        return;
+    }
+    let views = &*views;
 
-                // Skip computing visibility for entities that are configured to be hidden.
-                // ViewVisibility has already been reset in `reset_view_visibility`.
-                if !inherited_visibility.get() {
-                    return;
-                }
+    visible_aabb_query.par_iter_mut().for_each_init(
+        || {
+            let mut queues = thread_queues.borrow_local_mut();
+            if queues.len() < views.len() {
+                queues.resize_with(views.len(), Default::default);
+            }
+            queues
+        },
+        |queues, query_item| {
+            let (
+                entity,
+                inherited_visibility,
+                mut view_visibility,
+                visibility_class,
+                maybe_entity_mask,
+                maybe_model_aabb,
+                maybe_model_sphere,
+                transform,
+                no_frustum_culling,
+                has_visibility_range,
+            ) = query_item;
 
-                let entity_mask = maybe_entity_mask.unwrap_or_default();
-                if !view_mask.intersects(entity_mask) {
-                    return;
+            // Skip computing visibility for entities that are configured to be hidden.
+            // ViewVisibility has already been reset in `reset_view_visibility`.
+            if !inherited_visibility.get() {
+                return;
+            }
+
+            let entity_mask = maybe_entity_mask.unwrap_or_default();
+            // The model's bounds in world space, computed for the first view
+            // that needs them and kept for the rest.
+            let mut world_bounds = None;
+            let mut visible = false;
+
+            for (view_index, view) in views.iter().enumerate() {
+                if !view.mask.intersects(entity_mask) {
+                    continue;
                 }
 
                 // If outside of the visibility range, cull.
                 if has_visibility_range
                     && visible_entity_ranges.is_some_and(|visible_entity_ranges| {
-                        !visible_entity_ranges.entity_is_in_range_of_view(entity, view)
+                        !visible_entity_ranges.entity_is_in_range_of_view(entity, view.entity)
                     })
                 {
-                    return;
+                    continue;
                 }
 
                 // If we have an aabb or a bounding sphere, do frustum culling
-                if !no_frustum_culling && !no_cpu_culling_camera {
+                if !no_frustum_culling && view.frustum_culling {
                     if let Some(model_aabb) = maybe_model_aabb {
-                        let world_from_local = transform.affine();
-                        let model_sphere = Sphere {
-                            center: world_from_local.transform_point3a(model_aabb.center),
-                            radius: transform.radius_vec3a(model_aabb.half_extents),
-                        };
+                        let (world_from_local, model_sphere) =
+                            *world_bounds.get_or_insert_with(|| {
+                                let world_from_local = transform.affine();
+                                let model_sphere = Sphere {
+                                    center: world_from_local.transform_point3a(model_aabb.center),
+                                    radius: transform.radius_vec3a(model_aabb.half_extents),
+                                };
+                                (world_from_local, model_sphere)
+                            });
                         // Do quick sphere-based frustum culling
-                        if !frustum.intersects_sphere(&model_sphere, false) {
-                            return;
+                        if !view.frustum.intersects_sphere(&model_sphere, false) {
+                            continue;
                         }
                         // Do aabb-based frustum culling
-                        if !frustum.intersects_obb(model_aabb, &world_from_local, true, false) {
-                            return;
+                        if !view
+                            .frustum
+                            .intersects_obb(model_aabb, &world_from_local, true, false)
+                        {
+                            continue;
                         }
                     } else if let Some(model_sphere) = maybe_model_sphere
-                        && !frustum.intersects_sphere(model_sphere, false)
+                        && !view.frustum.intersects_sphere(model_sphere, false)
                     {
                         // Do sphere-based frustum culling in this case
-                        return;
+                        continue;
                     }
                 }
 
-                view_visibility.set_visible();
+                visible = true;
 
                 // The visibility class may be None here because AABB gizmos can be enabled via
                 // config without a renderable component being added to the entity. This workaround
                 // allows view visibility to be set for entities without a renderable component, but
                 // still need to render gizmos.
                 if let Some(visibility_class) = visibility_class {
-                    // Add the entity to the queue for all visibility classes the entity is in.
+                    // Add the entity to the view's queue for all visibility classes the entity is in.
+                    let queue = &mut queues[view_index];
                     for visibility_class_id in visibility_class.iter() {
                         queue.entry(*visibility_class_id).or_default().push(entity);
                     }
                 }
-            },
-        );
+            }
 
+            if visible {
+                view_visibility.set_visible();
+            }
+        },
+    );
+
+    for (view_index, view) in views.iter().enumerate() {
+        let Ok((_, mut visible_entities, ..)) = view_query.get_mut(view.entity) else {
+            continue;
+        };
         visible_entities.clear_all();
 
-        // Drain all the thread queues into the `visible_entities` list.
-        for class_queues in thread_queues.iter_mut() {
+        // Drain all the thread queues of this view into the `visible_entities` list.
+        for view_queues in thread_queues.iter_mut() {
+            let Some(class_queues) = view_queues.get_mut(view_index) else {
+                continue;
+            };
             for (class, entities) in class_queues {
                 visible_entities.get_mut(*class).append(entities);
             }
@@ -1445,5 +1505,93 @@ mod test {
                 "Frame 5: should NOT be changed"
             );
         }
+    }
+
+    /// Each view gets the entities on its own layers and in its own frustum,
+    /// and an entity seen by any view is visible, though one pass tests it
+    /// against all of them.
+    #[test]
+    fn each_view_gets_its_own_visible_entities() {
+        use bevy_math::{proj, Mat4, Vec3};
+        use bevy_shape::ViewFrustum;
+
+        struct Drawn;
+
+        let mut app = App::new();
+        app.add_plugins(TaskPoolPlugin::default());
+        app.add_systems(Update, check_visibility_cpu_culling);
+
+        // Each view sees x and y from -1 to 1 around its center.
+        let view_at = |x: f32| {
+            Frustum(ViewFrustum::from_clip_from_world(
+                &(proj::orthographic(-1.0, 1.0, -1.0, 1.0, 10.0, -10.0)
+                    * Mat4::from_translation(Vec3::new(-x, 0.0, 0.0))),
+            ))
+        };
+        let mut spawn_view = |x: f32, layers: RenderLayers, active: bool| {
+            app.world_mut()
+                .spawn((
+                    Camera {
+                        is_active: active,
+                        ..Default::default()
+                    },
+                    VisibleEntities::default(),
+                    view_at(x),
+                    layers,
+                ))
+                .id()
+        };
+        let left = spawn_view(0.0, RenderLayers::layer(0), true);
+        let right = spawn_view(10.0, RenderLayers::layer(0), true);
+        let overlay = spawn_view(0.0, RenderLayers::layer(1), true);
+        let inactive = spawn_view(10.0, RenderLayers::layer(0), false);
+
+        let mut spawn_drawn = |x: f32, layers: RenderLayers| {
+            let mut class = VisibilityClass::default();
+            class.push(TypeId::of::<Drawn>());
+            app.world_mut()
+                .spawn((
+                    InheritedVisibility::VISIBLE,
+                    ViewVisibility::HIDDEN,
+                    class,
+                    layers,
+                    Aabb::from_min_max(Vec3::splat(-0.1), Vec3::splat(0.1)),
+                    GlobalTransform::from_xyz(x, 0.0, 0.0),
+                ))
+                .id()
+        };
+        let on_left = spawn_drawn(0.0, RenderLayers::layer(0));
+        let on_right = spawn_drawn(10.0, RenderLayers::layer(0));
+        let on_overlay = spawn_drawn(0.0, RenderLayers::layer(1));
+        let nowhere = spawn_drawn(5.0, RenderLayers::layer(0));
+        // Seen but drawn from no list: no class, ViewVisibility all the same.
+        let classless = app
+            .world_mut()
+            .spawn((
+                InheritedVisibility::VISIBLE,
+                ViewVisibility::HIDDEN,
+                Aabb::from_min_max(Vec3::splat(-0.1), Vec3::splat(0.1)),
+                GlobalTransform::from_xyz(0.0, 0.0, 0.0),
+            ))
+            .id();
+
+        app.update();
+
+        let seen = |view: Entity| -> Vec<Entity> {
+            app.world()
+                .get::<VisibleEntities>(view)
+                .unwrap()
+                .get(TypeId::of::<Drawn>())
+                .to_vec()
+        };
+        assert_eq!(seen(left), vec![on_left]);
+        assert_eq!(seen(right), vec![on_right]);
+        assert_eq!(seen(overlay), vec![on_overlay]);
+        assert_eq!(seen(inactive), Vec::<Entity>::new());
+
+        let visible = |entity: Entity| app.world().get::<ViewVisibility>(entity).unwrap().get();
+        assert!(visible(on_left) && visible(on_right) && visible(on_overlay));
+        assert!(!visible(nowhere));
+        assert!(visible(classless));
     }
 }
