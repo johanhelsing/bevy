@@ -19,6 +19,7 @@ use bevy_core_pipeline::{
 use bevy_derive::{Deref, DerefMut};
 use bevy_ecs::system::{SystemParam, SystemState};
 use bevy_ecs::{
+    change_detection::ContiguousRef,
     prelude::*,
     system::{
         lifetimeless::{SRes, SResMut},
@@ -401,27 +402,37 @@ pub struct RenderMaterial2dInstances(MainEntityHashMap<UntypedAssetId>);
 
 pub fn extract_mesh_materials_2d<M: Material2d>(
     mut material_instances: ResMut<RenderMaterial2dInstances>,
-    changed_meshes_query: Extract<
-        Query<
-            (Entity, &ViewVisibility, &MeshMaterial2d<M>),
-            Or<(Changed<ViewVisibility>, Changed<MeshMaterial2d<M>>)>,
-        >,
-    >,
+    meshes_query: Extract<Query<(Entity, Ref<ViewVisibility>, Ref<MeshMaterial2d<M>>)>>,
     mut removed_materials_query: Extract<RemovedComponents<MeshMaterial2d<M>>>,
 ) {
-    for (entity, view_visibility, material) in &changed_meshes_query {
-        if view_visibility.get() {
-            add_mesh_instance(entity, material, &mut material_instances);
-        } else {
-            remove_mesh_instance::<M>(entity, &mut material_instances);
+    // The change ticks a table at a time. An `Or<(Changed<..>, ..)>` filter
+    // costs tens of nanoseconds a row over meshes that mostly sit still
+    // (cargo-space 7mgt).
+    let tables = meshes_query
+        .contiguous_iter()
+        .expect("the 2D material extraction's components are all table components");
+    for (entities, visibility, material) in tables {
+        let (visibility, visibility_ticks) = ContiguousRef::split(visibility);
+        let (material, material_ticks) = ContiguousRef::split(material);
+        let (last_run, this_run) = (visibility_ticks.last_run(), visibility_ticks.this_run());
+        for row in 0..entities.len() {
+            if !(visibility_ticks.changed()[row].is_newer_than(last_run, this_run)
+                || material_ticks.changed()[row].is_newer_than(last_run, this_run))
+            {
+                continue;
+            }
+            if visibility[row].get() {
+                add_mesh_instance(entities[row], &material[row], &mut material_instances);
+            } else {
+                remove_mesh_instance::<M>(entities[row], &mut material_instances);
+            }
         }
     }
 
     for entity in removed_materials_query.read() {
-        // Only queue a mesh for removal if we didn't pick it up above.
-        // It's possible that a necessary component was removed and re-added in
-        // the same frame.
-        if !changed_meshes_query.contains(entity) {
+        // Only if the entity has no material now: one removed and re-added in
+        // the same frame reads as changed, so the scan above took it.
+        if !meshes_query.contains(entity) {
             remove_mesh_instance::<M>(entity, &mut material_instances);
         }
     }

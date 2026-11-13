@@ -29,6 +29,7 @@ use bevy_core_pipeline::{
 };
 use bevy_derive::{Deref, DerefMut};
 use bevy_ecs::{
+    change_detection::{ContiguousRef, Tick},
     prelude::*,
     query::ROQueryItem,
     system::{lifetimeless::*, SystemParamItem},
@@ -299,19 +300,17 @@ pub fn extract_2d_meshes(
     mut render_mesh_instances: ResMut<RenderMesh2dInstances>,
     render_material_instances: Res<RenderMaterial2dInstances>,
     render_material_bindings: Res<RenderMaterialBindings>,
-    changed_meshes_query: Extract<
-        Query<
-            Mesh2dExtractionQuery,
-            Or<(
-                Changed<ViewVisibility>,
-                Changed<GlobalTransform>,
-                Changed<Mesh2d>,
-                Changed<MeshTag>,
-                Changed<NoAutomaticBatching>,
-            )>,
-        >,
-    >,
     all_meshes_query: Extract<Query<Mesh2dExtractionQuery>>,
+    scan_meshes_query: Extract<
+        Query<(
+            Entity,
+            Ref<ViewVisibility>,
+            Ref<GlobalTransform>,
+            Ref<Mesh2d>,
+            Option<Ref<MeshTag>>,
+            Option<Ref<NoAutomaticBatching>>,
+        )>,
+    >,
     (
         mut removed_mesh2d_components,
         mut removed_no_automatic_batching_components,
@@ -355,34 +354,60 @@ pub fn extract_2d_meshes(
         );
     }
 
-    // Next, process meshes that changed.
-    for (entity, view_visibility, transform, handle, tag, no_automatic_batching) in
-        &changed_meshes_query
-    {
-        extract_2d_mesh(
-            entity.into(),
-            view_visibility,
-            transform,
-            handle,
-            tag,
-            no_automatic_batching,
-            &mut render_mesh_instances,
-            &render_material_instances,
-            &render_material_bindings,
-            &mut reextract_entities,
-        );
+    // Next, process meshes that changed, reading the change ticks a table at
+    // a time. An `Or<(Changed<..>, ..)>` filter costs tens of nanoseconds a
+    // row, which over tens of thousands of meshes that mostly sit still was
+    // most of a frame's extraction (cargo-space 7mgt).
+    let tables = scan_meshes_query
+        .contiguous_iter()
+        .expect("the 2D mesh extraction's components are all table components");
+    for (entities, visibility, transform, handle, tag, no_automatic_batching) in tables {
+        let (visibility, visibility_ticks) = ContiguousRef::split(visibility);
+        let (transform, transform_ticks) = ContiguousRef::split(transform);
+        let (handle, handle_ticks) = ContiguousRef::split(handle);
+        let tag = tag.map(ContiguousRef::split);
+        let no_automatic_batching = no_automatic_batching.map(ContiguousRef::split);
+        let (last_run, this_run) = (visibility_ticks.last_run(), visibility_ticks.this_run());
+        let changed = |ticks: &[Tick], row: usize| ticks[row].is_newer_than(last_run, this_run);
+        for row in 0..entities.len() {
+            let visibility_changed = changed(visibility_ticks.changed(), row);
+            // Hidden now and when last extracted: there is no
+            // instance to update or remove, whatever else changed.
+            // A moving mesh off screen is skipped here.
+            if !visibility[row].get() && !visibility_changed {
+                continue;
+            }
+            if !(visibility_changed
+                || changed(transform_ticks.changed(), row)
+                || changed(handle_ticks.changed(), row)
+                || tag.as_ref().is_some_and(|(_, t)| changed(t.changed(), row))
+                || no_automatic_batching
+                    .as_ref()
+                    .is_some_and(|(_, t)| changed(t.changed(), row)))
+            {
+                continue;
+            }
+            extract_2d_mesh(
+                entities[row].into(),
+                &visibility[row],
+                &transform[row],
+                &handle[row],
+                tag.as_ref().map(|(tags, _)| &tags[row]),
+                no_automatic_batching.is_some(),
+                &mut render_mesh_instances,
+                &render_material_instances,
+                &render_material_bindings,
+                &mut reextract_entities,
+            );
+        }
     }
 
     // Now remove meshes corresponding to entities that lost their `Mesh2d`
-    // components.
-    // Only queue a mesh for removal if we didn't pick it up above.
-    // It's possible that the `Mesh2d` component was removed and re-added in the
-    // same frame.
+    // components, if they have none now: one removed and re-added in the same
+    // frame reads as changed, so the scan above took it.
     for entity in removed_mesh2d_components.read() {
         let main_entity = MainEntity::from(entity);
-        if !changed_meshes_query.contains(*main_entity)
-            && !reextract_entities.contains(&main_entity)
-        {
+        if !all_meshes_query.contains(*main_entity) && !reextract_entities.contains(&main_entity) {
             render_mesh_instances.remove(&main_entity);
         }
     }
@@ -1133,5 +1158,127 @@ impl<P: PhaseItem> RenderCommand<P> for DrawMesh2d {
             }
         }
         RenderCommandResult::Success
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use bevy_camera::visibility::ViewVisibility;
+    use bevy_ecs::prelude::*;
+    use bevy_extract::MainWorld;
+    use bevy_math::Vec3;
+    use bevy_mesh::{Mesh2d, MeshTag};
+    use bevy_render::{
+        batching::NoAutomaticBatching, material_bind_groups::RenderMaterialBindings,
+        sync_world::MainEntity,
+    };
+    use bevy_transform::components::GlobalTransform;
+
+    use super::{extract_2d_meshes, RenderMesh2dInstances};
+    use crate::{
+        mesh2d::material::extract_mesh_materials_2d, ColorMaterial, MeshMaterial2d,
+        RenderMaterial2dInstances,
+    };
+
+    /// Extract once, as a frame does: the main world as `MainWorld` in the
+    /// render world, the two systems in order, then the main world's tick
+    /// moved on.
+    fn extract(main: &mut World, render: &mut World, schedule: &mut Schedule) {
+        let mut main_world = MainWorld::default();
+        *main_world = core::mem::take(main);
+        render.insert_resource(main_world);
+        schedule.run(render);
+        *main = core::mem::take(&mut *render.remove_resource::<MainWorld>().unwrap());
+        main.increment_change_tick();
+    }
+
+    /// The 2D mesh extraction reads the change ticks a table at a time
+    /// (cargo-space 7mgt), and skips a mesh hidden now and when last extracted
+    /// whatever else changed. Each change still lands: a mesh moved while
+    /// hidden draws where it is once shown, one hidden is gone, a tag and
+    /// `NoAutomaticBatching` are read, and a mesh that only moves is updated.
+    #[test]
+    fn extracts_what_changed_and_skips_what_stays_hidden() {
+        let mut main = World::new();
+        let mut render = World::new();
+        render.init_resource::<RenderMesh2dInstances>();
+        render.init_resource::<RenderMaterial2dInstances>();
+        render.init_resource::<RenderMaterialBindings>();
+        let mut schedule = Schedule::default();
+        schedule.add_systems(
+            (
+                extract_mesh_materials_2d::<ColorMaterial>,
+                extract_2d_meshes,
+            )
+                .chain(),
+        );
+
+        let at = |x: f32| GlobalTransform::from_translation(Vec3::new(x, 0.0, 0.0));
+        let mesh = |visibility, x| {
+            (
+                Mesh2d::default(),
+                MeshMaterial2d::<ColorMaterial>::default(),
+                visibility,
+                at(x),
+            )
+        };
+        let shown = main.spawn(mesh(ViewVisibility::VISIBLE, 1.0)).id();
+        let hidden = main.spawn(mesh(ViewVisibility::HIDDEN, 2.0)).id();
+        let tagged = main
+            .spawn((mesh(ViewVisibility::VISIBLE, 3.0), MeshTag::new(7)))
+            .id();
+        extract(&mut main, &mut render, &mut schedule);
+
+        let x = |render: &World, entity: Entity| {
+            render
+                .resource::<RenderMesh2dInstances>()
+                .get(&MainEntity::from(entity))
+                .map(|i| i.transforms.world_from_local.translation.x)
+        };
+        assert_eq!(x(&render, shown), Some(1.0));
+        assert_eq!(x(&render, hidden), None);
+        assert_eq!(x(&render, tagged), Some(3.0));
+        let tag = |render: &World| {
+            render.resource::<RenderMesh2dInstances>()[&MainEntity::from(tagged)].tag
+        };
+        assert_eq!(tag(&render), 7);
+
+        // Moved: the shown mesh follows, the hidden one stays out.
+        main.entity_mut(shown).insert(at(10.0));
+        main.entity_mut(hidden).insert(at(20.0));
+        main.entity_mut(tagged).insert(MeshTag::new(8));
+        extract(&mut main, &mut render, &mut schedule);
+        assert_eq!(x(&render, shown), Some(10.0));
+        assert_eq!(x(&render, hidden), None);
+        assert_eq!(tag(&render), 8);
+
+        // Shown after moving while hidden: drawn where it is now.
+        main.entity_mut(hidden).insert(ViewVisibility::VISIBLE);
+        // Hidden: gone.
+        main.entity_mut(shown).insert(ViewVisibility::HIDDEN);
+        main.entity_mut(tagged).insert(NoAutomaticBatching);
+        extract(&mut main, &mut render, &mut schedule);
+        assert_eq!(x(&render, hidden), Some(20.0));
+        assert_eq!(x(&render, shown), None);
+        assert!(
+            !render.resource::<RenderMesh2dInstances>()[&MainEntity::from(tagged)]
+                .automatic_batching
+        );
+
+        // A hidden mesh that moves stays out. A shown one left alone is not
+        // extracted again: its instance keeps a value only the render world
+        // holds.
+        main.entity_mut(shown).insert(at(30.0));
+        render
+            .resource_mut::<RenderMesh2dInstances>()
+            .get_mut(&MainEntity::from(hidden))
+            .unwrap()
+            .transforms
+            .world_from_local
+            .translation
+            .x = 99.0;
+        extract(&mut main, &mut render, &mut schedule);
+        assert_eq!(x(&render, shown), None);
+        assert_eq!(x(&render, hidden), Some(99.0));
     }
 }
