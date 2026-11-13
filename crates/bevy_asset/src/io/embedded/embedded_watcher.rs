@@ -75,7 +75,7 @@ impl EmbeddedWatcher {
 impl AssetWatcher for EmbeddedWatcher {}
 
 /// The folders one [`EmbeddedWatcher`] watches.
-pub struct WatchedFolders {
+pub(crate) struct WatchedFolders {
     debouncer: Debouncer<RecommendedWatcher, RecommendedCache>,
     folders: HashSet<PathBuf>,
 }
